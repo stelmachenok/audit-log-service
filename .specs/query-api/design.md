@@ -60,6 +60,28 @@ GET /api/v1/audit-events
 - All filters are combined with logical AND.
 - All filters are exact-match (no ranges or partial matches on `actor`,
   `resourceType`, `resourceId`).
+- **Value normalization.** Filter values are trimmed of leading/trailing
+  whitespace before use, and an `actor` / `resourceType` / `resourceId` that is
+  absent, empty, or whitespace-only is treated as **no filter on that field** (not
+  as a filter on the empty string). The exact same normalization is applied both
+  when building the SQL query and when computing the cursor filter hash (§4.3), so
+  the two can never disagree.
+
+### 2.3. Coexistence with the legacy `?actor=` handler
+
+A `GET /api/v1/audit-events?actor=…` handler predates this contract and is
+**retained**. Selection between the two is by query parameters:
+
+- both `from` and `to` present ⇒ the **paginated contract** in this document
+  (`actor`, if also supplied, is just one more optional equality filter);
+- `actor` present but **not** both bounds ⇒ the **legacy actor-only handler**,
+  which returns the actor's events in its own (pre-existing) shape.
+
+Known routing edge: a request that supplies exactly **one** bound plus `actor`
+(e.g. `?from=…&actor=…`) does not match the paginated contract and falls through to
+the legacy handler, so it returns `200` with the legacy actor list rather than
+`400 MISSING_PARAMETER`. A request with one bound (or neither) and **no** `actor`
+still returns `400` (§3). This edge is a known deviation, not a goal.
 
 ## 3. API contract — status codes
 
@@ -86,6 +108,13 @@ Notes:
   request with an empty result.)
 - Authentication and authorization are out of scope; no `401`/`403` contract is
   defined here. Rate limiting (`429`) is an Open Question in `requirements.md`.
+- The "`from` or `to` missing ⇒ `400`" row assumes no `actor` is present. A request
+  that supplies exactly one bound *and* `actor` is routed to the legacy handler
+  (§2.3) and returns `200`, not `400`.
+- When several problems coexist, the API layer's syntactic validation runs before
+  the application layer sees the request: `from > to` *plus* a malformed `cursor`
+  ⇒ `400 INVALID_CURSOR` (the cursor is decoded first), whereas `from > to` with a
+  *valid* `cursor` ⇒ the `200` empty page (§4.3, §6).
 
 ### 3.1. Error body
 
@@ -147,15 +176,34 @@ Why keyset over offset:
   the wire contract never exposes `LIMIT`/`OFFSET` and the internal cursor
   representation can change without breaking clients.
 
+Implementation note: the persistence adapter issues the keyset query directly (the
+`(occurredAt, id) > (?, ?)` predicate plus `LIMIT`); it never issues SQL `OFFSET`,
+even if it happens to reuse an offset-capable paging API with the offset pinned to
+zero.
+
 ### 4.3. Cursor format and semantics
 
-- The `cursor` is **opaque** to the client: a base64url-encoded JSON object. Its
-  internal shape is an implementation detail and may change (the version tag below
-  guards old tokens).
-- It carries: a `v` version tag, the `occurredAt` of the last returned row, the
-  `id` of the last returned row, and `f` — a hash of the **normalized filter set**
-  (`from`, `to`, `actor`, `resourceType`, `resourceId`; canonical ordering and
-  encoding before hashing).
+- The `cursor` is **opaque** to the client: base64url (RFC 4648, **no padding**) of
+  a small JSON object. The internal shape is an implementation detail — it is fixed
+  in `api.cursor.CursorCodec`, not part of the wire contract, and may change; the
+  `v` version tag guards old tokens. The current shape is:
+
+  ```json
+  { "v": 1, "t": "<occurredAt, ISO-8601 instant>", "id": "<last row id, canonical UUID>", "f": "<filter hash>" }
+  ```
+
+  (`t` and `id` are carried as strings so a vanilla JSON mapper round-trips them.)
+- `f` is a hash of the **normalized filter set**, computed as follows:
+  - take the five filter inputs in the fixed order `from`, `to`, `actor`,
+    `resourceType`, `resourceId`;
+  - normalize each value per §2.2 (trim; absent / empty / whitespace-only ⇒ the
+    empty value);
+  - render each as `name=value` and join the five with `\n`;
+  - hash that string with **SHA-256** and base64url-encode the digest (no padding).
+
+  Because the order is fixed, the hash is independent of query-parameter order; and
+  because it uses the same normalization as the actual query (§2.2), a cursor whose
+  `f` matches always describes the same SQL filter.
 - Given a `cursor`, the next page is:
 
   ```
@@ -165,18 +213,46 @@ Why keyset over offset:
   LIMIT <limit>
   ```
 
+  The row-value comparison `(occurredAt, id) > (?, ?)` may be lowered to the
+  equivalent boolean form `occurredAt > ? OR (occurredAt = ? AND id > ?)` on stacks
+  without a row-value operator; the two are semantically identical.
 - No `cursor` ⇒ first page.
-- `nextCursor` is present (a token) **iff** the response returned a full page of
-  `limit` rows and more rows may exist beyond it; otherwise it is `null` (or
-  omitted). When the iteration reaches the last page, `nextCursor` is `null`.
+- `nextCursor` is present (a token) **iff** the response returned a *full* page of
+  exactly `limit` rows; otherwise it is `null` (or omitted). A full page always
+  yields a token, even when no further matching rows actually exist — in that case
+  the next call returns an empty page with `nextCursor: null`. Iteration therefore
+  terminates when a call returns fewer than `limit` rows (possibly zero); when the
+  matching set's size is an exact multiple of `limit`, that is one extra (empty)
+  call.
 - A token that is undecodable, has an unknown `v`, or whose `f` does not match the
   filters supplied alongside it ⇒ `400` (treated as a malformed cursor). The
   filter-hash check prevents silently-wrong pagination when a client reuses a
-  cursor against a different filter combination.
+  cursor against a different filter combination. This decode/check runs before the
+  `from > to` short-circuit (§3, §6).
 - A well-formed `cursor` supplied together with `from > to` still returns `200`
   with an empty page (the empty-range rule in §6 wins).
 - Cursor lifetime / reuse-after-expiry semantics are an Open Question in
   `requirements.md`.
+
+### 4.4. Internal value contracts
+
+These types carry the query and its result across the API → application →
+persistence boundary. They are internal (not part of the wire contract), but the
+shapes are fixed here so the layers agree:
+
+- `AuditEventQuery(Instant from, Instant to, String actor, String resourceType,
+  String resourceId, int limit, KeysetPosition after)` — `from` and `to` non-null;
+  `actor` / `resourceType` / `resourceId` already normalized per §2.2 (so `null`
+  there means "no filter on that field"); `limit` already validated to `[1, 1000]`
+  by the API layer; `after` non-null only when the request carried a valid
+  `cursor`. The persistence adapter trusts these fields and does not re-validate
+  them.
+- `KeysetPosition(Instant occurredAt, UUID id)` — both non-null; the `(occurredAt,
+  id)` of the last row of the previous page (the decoded cursor boundary).
+- `AuditEventPage(List<AuditEvent> events, boolean hasMore)` — `events` is the page
+  in `(occurredAt, id)` ascending order; `hasMore == (events.size() == limit)`. The
+  API layer emits a `nextCursor` iff `hasMore`, consistent with the §4.3
+  `nextCursor` rule.
 
 ## 5. Response
 
@@ -188,26 +264,36 @@ Why keyset over offset:
     {
       "id": "01HE…Z9",
       "occurredAt": "2026-04-17T11:02:14Z",
-      "actor":    { "id": "u_42",      "type": "user" },
-      "resource": { "id": "order/9f3b…", "type": "order" },
+      "actor":    { "id": "u_42",  "type": null },
+      "resource": { "id": "9f3b…", "type": "order" },
       "action":   "order.refunded",
-      "payload":  { }
+      "payload":  "{\"amount\":1299,\"currency\":\"USD\"}"
     }
   ],
   "nextCursor": "…"
 }
 ```
 
+The example values are illustrative; the field-level rules below are normative
+where they differ from it.
+
 Field semantics:
 
 - `id` — unique audit event identifier.
 - `occurredAt` — server-assigned timestamp of the event (UTC, ISO-8601).
-- `actor.id`, `actor.type` — who performed the action.
-- `resource.id`, `resource.type` — what was acted upon.
+- `actor.id` — who performed the action.
+- `actor.type` — **currently always `null`**: it is not modeled in the schema yet
+  (see §1.1). The field is still emitted (as `null`) for forward compatibility.
+- `resource.type` — what kind of thing was acted upon; `null` when not recorded.
+- `resource.id` — the stored `resource_id` value verbatim; it carries no `type/`
+  prefix. `null` when not recorded.
 - `action` — domain action name.
-- `payload` — event-specific structured data; opaque to this API.
-- `nextCursor` — present (a token) when more pages exist; `null` or omitted
-  otherwise.
+- `payload` — the stored `details` value (`TEXT`), passed through **verbatim as a
+  JSON string** (or `null`); this API does not re-parse it into a JSON object. (If
+  `details` ever becomes `jsonb`, this would instead be an embedded JSON object.)
+- `nextCursor` — present (a token) when a full page of `limit` rows was returned
+  (see §4.3); `null` otherwise. The implementation always includes the field, using
+  `null` rather than omitting it.
 
 ### 5.2. Empty results
 
@@ -221,15 +307,20 @@ page after the last record.
   either ⇒ `400`. Open-ended ranges are not allowed — both bounds must be present.
 - **Instant format.** `from` and `to` must be valid ISO-8601 instants in UTC with
   the `Z` suffix. Other offsets (e.g. `+02:00`) are currently rejected ⇒ `400`.
-  (Whether to accept and normalize offsets is an Open Question in
-  `requirements.md`.)
+  Note that a lenient parser such as Java's `Instant.parse` *accepts* offset forms
+  and silently normalizes them to UTC, so the API layer must reject a non-`Z`
+  offset with an explicit check rather than relying on the parser to fail. (Whether
+  to accept and normalize offsets is an Open Question in `requirements.md`.)
 - **`from > to`.** Treated as a *valid* request with an empty result: `200`,
   `data: []`, `nextCursor: null`. Never an error.
+- **`from == to`.** Also valid: `[from, from)` is an empty range, so it returns
+  `200`, `data: []`, `nextCursor: null`. Not an error.
 - **Maximum time window.** If `to − from` exceeds **90 days**, the request is
-  rejected with `422` (`code: INVALID_TIME_RANGE`). This concrete 90-day cap is a
-  design decision that supersedes the "maximum `from`/`to` window" Open Question
-  in `requirements.md`, pending product sign-off; if the value changes, only this
-  section and the §3 table change.
+  rejected with `422` (`code: INVALID_TIME_RANGE`); a window of exactly 90 days is
+  allowed. This concrete 90-day cap is a design decision that supersedes the
+  "maximum `from`/`to` window" Open Question in `requirements.md`, pending product
+  sign-off; it is a fixed constant in the application layer (not configuration). If
+  the value changes, only this section and the §3 table change.
 - **Empty filters.** A request with only `from` and `to` (no `actor`,
   `resourceType`, or `resourceId`) is valid and returns every event whose
   `occurredAt` is in `[from, to)`, paginated normally.
@@ -241,6 +332,16 @@ page after the last record.
   cursor ⇒ `400`; no server state is altered. A well-formed cursor combined with
   `from > to` still ⇒ `200` empty page. Cursor lifetime/reuse remains an Open
   Question in `requirements.md`.
+- **Validation precedence.** The API layer runs syntactic checks in this order:
+  parse `from` / `to` → check `limit` → compute the filter fingerprint → decode
+  `cursor` → invoke the use case (which then applies `from > to` and the 90-day
+  cap). Consequence: a malformed `cursor` is reported (`400 INVALID_CURSOR`) even
+  when `from > to` would otherwise have produced a `200` empty page; a valid
+  `cursor` with `from > to` still yields the `200` empty page (`after` is ignored
+  in that case).
+- **Filter normalization.** `actor` / `resourceType` / `resourceId` are trimmed,
+  and an empty or whitespace-only value is treated as absent (§2.2) — for both the
+  query and the cursor filter hash (§4.3).
 - **Filter combinations.** All optional filters are exact-match, combined with
   AND, and may appear in any subset; `resourceType` and `resourceId` are
   independent.
@@ -280,7 +381,21 @@ The `V1` indexes `idx_audit_events_actor` and `idx_audit_events_timestamp`
 (`timestamp DESC`) become redundant once the above exist — `(actor, timestamp, id)`
 supersedes the first, and `(timestamp, id)` ascending matches this endpoint's sort
 direction better than the descending one — so the same future migration would drop
-them.
+them. Dropping `idx_audit_events_actor` does not regress the legacy `?actor=` query
+(§2.3): `(actor, timestamp, id)` still serves `WHERE actor = ?`.
+
+Operational and sequencing notes:
+
+- The migration uses plain `CREATE INDEX`. On a large production `audit_events`
+  table that holds a lock for the duration of the build; rolling the indexes out
+  with `CREATE INDEX CONCURRENTLY` (which cannot run inside a transaction and so
+  needs a non-transactional Flyway script) is an operational follow-up, not part of
+  the baseline migration.
+- Until this `V2` migration is applied, only the `V1` indexes
+  (`idx_audit_events_timestamp` on `timestamp DESC`, `idx_audit_events_actor`)
+  exist, so the ascending-sort and resource-filter cases are **not** index-backed.
+  The §9 "index-backed under all filter combinations" guarantee holds only once
+  `V2` has landed; sequence accordingly.
 
 ## 8. Functional requirements
 
@@ -298,7 +413,12 @@ them.
 
 - Read operations must not violate the append-only invariant defined in
   `AGENTS.md` (no `UPDATE`, no `DELETE`, no `INSERT` triggered by the query path).
-- Queries must remain index-backed under all supported filter combinations.
+- Queries must remain index-backed under all supported filter combinations — once
+  the §7 `V2` index set is in place (before that, only the `V1` indexes exist; see
+  §7). This rests on the §7 index design (one most-selective index per query plus
+  residual equality filters, or a bitmap-AND of two of them); it is a design
+  argument, not in itself enforced by an automated `EXPLAIN` assertion unless one
+  is added against a dataset large enough that the planner prefers index scans.
 
 ## 10. Mapping to the `AGENTS.md` invariants
 

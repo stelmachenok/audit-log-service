@@ -6,6 +6,10 @@ A read-only HTTP endpoint that returns audit events filtered by actor, resource,
 and a mandatory time range. Results are paginated using an opaque cursor and
 returned in chronological (ascending) order.
 
+This paginated contract is selected when both `from` and `to` are supplied. A
+pre-existing `GET /api/v1/audit-events?actor=…` shape is retained for backward
+compatibility and is unchanged by this work (see `design.md` §2.3).
+
 The endpoint must not produce any side effects (no writes, no log entries
 beyond standard request logs).
 
@@ -67,12 +71,14 @@ continue to be ingested.
 
 **Acceptance criteria**
 
-- When more matching events exist than fit in one page, the system
-  shall return a `nextCursor` whose use on the subsequent call
+- When a page is returned containing exactly `limit` events, the
+  system shall return a `nextCursor` whose use on the subsequent call
   continues the iteration from the position immediately after the last
-  returned event.
-- When the iteration reaches the last page, the system shall omit
-  `nextCursor` or set it to `null`.
+  returned event — even when no further matching events exist, in which
+  case that subsequent call returns an empty page.
+- When a page is returned containing fewer than `limit` events
+  (including an empty page), the system shall omit `nextCursor` or set
+  it to `null`; iteration ends there.
 - While new audit events are being appended concurrently with
   pagination, the system shall not cause previously returned pages to
   repeat or skip rows (append-only invariant).
@@ -94,16 +100,20 @@ continue to be ingested.
 
 ## 4. Open Questions
 
-The following values are currently undefined. They are recorded here so
-that the implementation does not silently assume defaults; each item
-needs an explicit product or operations decision before it can leave
-this section.
+The following values are mostly undefined. They are recorded here so
+that the implementation does not silently assume defaults; each open
+item needs an explicit product or operations decision before it can
+leave this section. One item — the maximum time window — has a
+provisional decision and is implemented accordingly; it stays listed
+here only until product sign-off.
 
-- **Maximum `from`/`to` time window.** No upper bound on `to − from` is
-  currently defined. Should requests with a very wide window be
-  rejected, capped server-side, or accepted as-is? If rejected, with
-  which status code and which limit? (`design.md` proposes a 90-day
-  cap returning HTTP 422, pending product sign-off.)
+- **Maximum `from`/`to` time window.** *Resolved provisionally* in
+  `design.md` §6: a request whose `to − from` exceeds **90 days** is
+  rejected with HTTP `422` (`code: INVALID_TIME_RANGE`); a window of
+  exactly 90 days is allowed. The implementation follows this rule.
+  Still pending: product sign-off on the 90-day value (and on `422` as
+  the status). If the value changes, only `design.md` §6 and its §3
+  status table change.
 - **Retention window.** Is there a lower bound on `from` (i.e. how far
   back queryable history extends)? Is data older than some threshold
   expected to return empty results, an error, or to remain available
