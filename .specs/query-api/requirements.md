@@ -79,9 +79,14 @@ continue to be ingested.
 - When a page is returned containing fewer than `limit` events
   (including an empty page), the system shall omit `nextCursor` or set
   it to `null`; iteration ends there.
-- While new audit events are being appended concurrently with
-  pagination, the system shall not cause previously returned pages to
-  repeat or skip rows (append-only invariant).
+- While new audit events are appended during an in-progress
+  pagination, the system shall (a) never re-emit, on any later page,
+  an event already returned on an earlier page, and (b) still deliver,
+  exactly once across the remaining pages, every event that matched the
+  filters when the iteration began. (Because the store is append-only,
+  this is exercised in full by inserting events between successive page
+  fetches and walking the cursor to the last page — see `design.md`
+  §4.2.)
 - If a malformed or undecodable `cursor` is supplied, then the system
   shall reject the request with HTTP 400 without altering server
   state.

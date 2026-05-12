@@ -165,7 +165,13 @@ Why keyset over offset:
   matching row is skipped. With `OFFSET`, every insert (or delete) before the
   current position renumbers the remaining rows, which would duplicate or drop
   rows mid-iteration — directly contradicting User Story 3 and the append-only
-  invariant.
+  invariant. Because the store is append-only (no `UPDATE`/`DELETE`; see §10), the
+  *only* thing a concurrent writer can do is add a new tail row, so this guarantee
+  is exercised in full by inserting rows between successive page fetches and walking
+  the cursor to the end — no wall-clock concurrency is needed to test it. Hence the
+  two clauses of User Story 3's append-only acceptance criterion ("never re-emit a
+  returned event" / "deliver every event that matched at iteration start exactly
+  once") are directly testable.
 - **Predictable cost.** `OFFSET n` makes the database scan and discard `n` rows
   for every page, so deep pages get progressively slower (O(n)). A keyset
   predicate `(occurredAt, id) > (?, ?)` is a single index range scan whose cost
