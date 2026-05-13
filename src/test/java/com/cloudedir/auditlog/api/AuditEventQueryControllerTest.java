@@ -278,6 +278,52 @@ class AuditEventQueryControllerTest {
   }
 
   @Test
+  void filterValuesAreTrimmedAndBlankIsTreatedAsAbsent() throws Exception {
+    when(queryUseCase.query(any())).thenReturn(new AuditEventPage(List.of(), false));
+
+    mockMvc
+        .perform(
+            get("/api/v1/audit-events")
+                .param("from", FROM)
+                .param("to", TO)
+                .param("actor", "  u_1  ")
+                .param("resourceType", "")
+                .param("resourceId", "  "))
+        .andExpect(status().isOk());
+
+    var captor = ArgumentCaptor.forClass(AuditEventQuery.class);
+    org.mockito.Mockito.verify(queryUseCase).query(captor.capture());
+    var captured = captor.getValue();
+    assertThat(captured.actor()).isEqualTo("u_1");
+    assertThat(captured.resourceType()).isNull();
+    assertThat(captured.resourceId()).isNull();
+  }
+
+  @Test
+  void cursorIssuedAgainstNormalizedFiltersIsAcceptedWhenClientReSendsTheRawForm()
+      throws Exception {
+    // Cursor was issued for actor="u_1" (server-side normalized). When the client re-sends the
+    // request with the equivalent raw form actor="  u_1  ", normalization must produce the same
+    // FilterFingerprint so the cursor decodes successfully.
+    var canonicalFp =
+        new FilterFingerprint(Instant.parse(FROM), Instant.parse(TO), "u_1", null, null);
+    var token =
+        cursorCodec.encode(
+            new KeysetPosition(Instant.parse("2026-01-02T00:00:00Z"), UUID.randomUUID()),
+            canonicalFp);
+    when(queryUseCase.query(any())).thenReturn(new AuditEventPage(List.of(), false));
+
+    mockMvc
+        .perform(
+            get("/api/v1/audit-events")
+                .param("from", FROM)
+                .param("to", TO)
+                .param("actor", "  u_1  ")
+                .param("cursor", token))
+        .andExpect(status().isOk());
+  }
+
+  @Test
   void fromToAndActorHitsNewHandler() throws Exception {
     when(queryUseCase.query(any())).thenReturn(new AuditEventPage(List.of(), false));
 

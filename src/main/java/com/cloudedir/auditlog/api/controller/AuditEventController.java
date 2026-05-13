@@ -77,9 +77,16 @@ class AuditEventController {
       throw new InvalidRequestException("INVALID_LIMIT", "limit must be in [1, 1000].");
     }
 
-    var fingerprint = new FilterFingerprint(fromTs, toTs, actor, resourceType, resourceId);
+    var normActor = normalize(actor);
+    var normResourceType = normalize(resourceType);
+    var normResourceId = normalize(resourceId);
+
+    var fingerprint =
+        new FilterFingerprint(fromTs, toTs, normActor, normResourceType, normResourceId);
     KeysetPosition after = (cursor == null) ? null : cursorCodec.decode(cursor, fingerprint);
-    var query = new AuditEventQuery(fromTs, toTs, actor, resourceType, resourceId, limit, after);
+    var query =
+        new AuditEventQuery(
+            fromTs, toTs, normActor, normResourceType, normResourceId, limit, after);
 
     var page = queryUseCase.query(query);
     String nextCursor =
@@ -90,5 +97,9 @@ class AuditEventController {
   private static KeysetPosition lastPosition(List<AuditEvent> events) {
     var last = events.get(events.size() - 1);
     return new KeysetPosition(last.timestamp(), last.id());
+  }
+
+  private static String normalize(String v) {
+    return (v == null || v.isBlank()) ? null : v.trim();
   }
 }
