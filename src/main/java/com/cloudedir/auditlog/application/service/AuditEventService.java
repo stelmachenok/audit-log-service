@@ -12,6 +12,7 @@ import com.cloudedir.auditlog.domain.exception.InvalidTimeRangeException;
 import com.cloudedir.auditlog.domain.model.AuditEvent;
 import java.time.Duration;
 import java.time.Instant;
+import java.time.temporal.ChronoUnit;
 import java.util.List;
 import java.util.UUID;
 import org.springframework.stereotype.Service;
@@ -39,7 +40,7 @@ class AuditEventService implements RecordAuditEventUseCase, QueryAuditEventUseCa
             command.resourceType(),
             command.resourceId(),
             command.details(),
-            Instant.now());
+            Instant.now().truncatedTo(ChronoUnit.MICROS));
     return savePort.save(event);
   }
 
