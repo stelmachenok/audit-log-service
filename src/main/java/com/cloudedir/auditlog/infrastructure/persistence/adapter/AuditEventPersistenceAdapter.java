@@ -1,13 +1,17 @@
 package com.cloudedir.auditlog.infrastructure.persistence.adapter;
 
+import com.cloudedir.auditlog.application.port.in.AuditEventQuery;
 import com.cloudedir.auditlog.application.port.out.LoadAuditEventPort;
 import com.cloudedir.auditlog.application.port.out.SaveAuditEventPort;
 import com.cloudedir.auditlog.domain.model.AuditEvent;
 import com.cloudedir.auditlog.infrastructure.persistence.entity.AuditEventEntity;
 import com.cloudedir.auditlog.infrastructure.persistence.repository.AuditEventJpaRepository;
+import com.cloudedir.auditlog.infrastructure.persistence.repository.AuditEventSpecifications;
 import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
+import org.springframework.data.domain.PageRequest;
+import org.springframework.data.domain.Sort;
 import org.springframework.stereotype.Component;
 
 @Component
@@ -34,6 +38,15 @@ public class AuditEventPersistenceAdapter implements SaveAuditEventPort, LoadAud
   @Override
   public List<AuditEvent> findByActor(String actor) {
     return repository.findByActor(actor).stream().map(this::toDomain).toList();
+  }
+
+  @Override
+  public List<AuditEvent> find(AuditEventQuery query) {
+    var sort = Sort.by("timestamp").ascending().and(Sort.by("id").ascending());
+    var page = PageRequest.of(0, query.limit(), sort);
+    return repository.findAll(AuditEventSpecifications.matching(query), page).stream()
+        .map(this::toDomain)
+        .toList();
   }
 
   private AuditEventEntity toEntity(AuditEvent e) {
