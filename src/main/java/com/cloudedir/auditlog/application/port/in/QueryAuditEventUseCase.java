@@ -8,4 +8,6 @@ public interface QueryAuditEventUseCase {
   AuditEvent findById(UUID id);
 
   List<AuditEvent> findByActor(String actor);
+
+  AuditEventPage query(AuditEventQuery query);
 }
