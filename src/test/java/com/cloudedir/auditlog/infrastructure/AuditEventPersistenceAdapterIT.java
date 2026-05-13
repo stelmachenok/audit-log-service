@@ -276,13 +276,7 @@ class AuditEventPersistenceAdapterIT {
     var from = Instant.parse("2020-06-01T00:00:00Z");
     var seeded =
         new AuditEvent(
-            UUID.randomUUID(),
-            actor,
-            "LOGIN",
-            "SESSION",
-            null,
-            null,
-            from.plusSeconds(1));
+            UUID.randomUUID(), actor, "LOGIN", "SESSION", null, null, from.plusSeconds(1));
     adapter.save(seeded);
 
     var countBefore = repository.count();
