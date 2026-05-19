@@ -1,6 +1,6 @@
 ---
 name: spec-self-eval
-description: Evaluate a feature specification against the repository evaluation checklist and write a dated markdown report under .specs/<feature>/.
+description: Evaluate a feature specification against the repository evaluation checklist and write a numbered, dated markdown report under .specs/<feature>/.
 ---
 
 # Spec Self Eval
@@ -26,10 +26,14 @@ Use this skill when asked to evaluate, audit, review, or self-assess a feature s
 Write the report to:
 
 ```text
-.specs/<feature>/eval-report-<date>.md
+.specs/<feature>/eval-report-<date>-spec-self-eval-<eval_no>.md
 ```
 
 Use the local current date in `YYYY-MM-DD` format for `<date>`.
+Set `<eval_no>` to the next increasing integer for reports created for the same
+feature on the same date: inspect existing files matching
+`eval-report-<date>-spec-self-eval-*.md`, use `1` if none exist, otherwise use
+one more than the highest existing number.
 
 ## Evaluation Logic
 
@@ -94,4 +98,4 @@ Overall status: PASS | FAIL | WEAK
 Use the spec-self-eval skill to evaluate the query-api feature.
 ```
 
-This evaluates `.specs/query-api/requirements.md`, `.specs/query-api/design.md`, and `.specs/query-api/tasks.md`, then writes `.specs/query-api/eval-report-<date>.md`.
+This evaluates `.specs/query-api/requirements.md`, `.specs/query-api/design.md`, and `.specs/query-api/tasks.md`, then writes `.specs/query-api/eval-report-<date>-spec-self-eval-<eval_no>.md`.
