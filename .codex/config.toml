@@ -1,0 +1,11 @@
+﻿[features]
+hooks = true
+codex_hooks = true
+
+[[hooks.Stop]]
+
+[[hooks.Stop.hooks]]
+type = "command"
+command = 'powershell.exe -NoProfile -ExecutionPolicy Bypass -File "C:\Users\mast\IdeaProjects\cloudedir\audit-log-service\.codex\hooks\spec-self-eval-on-stop.ps1"'
+timeout = 600
+statusMessage = "Running spec-self-eval"
