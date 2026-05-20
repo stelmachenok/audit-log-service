@@ -19,7 +19,7 @@ AGENTS.md changes:
 
 ## Самое неочевидное, что поймал skill
 
-tasks.md T9 says to capture the performance verification artifact under .specs/query-api/, while this feature lives under .specs/companion-query-api/. This is a path consistency risk, not a checklist blocker. Но это изза того что дикерти
+tasks.md T9 says to capture the performance verification artifact under .specs/query-api/, while this feature lives under .specs/companion-query-api/. This is a path consistency risk, not a checklist blocker. Но это изза того что директория со спецификацией партнера называется иначе, чем описанная в skill.md
 
 ## Где skill и hook сэкономили бы время, а где был бы overhead
 
