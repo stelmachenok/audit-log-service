@@ -53,3 +53,7 @@
 - Specs live in `.specs/<feature>/`, written in English, with EARS-style acceptance criteria
 - The spec is the source of truth: when implementation and spec disagree, fix the spec first, then the code
 - Before writing a new spec, agents must ask 5–7 clarifying questions to surface assumptions and unknowns
+
+## Local automation
+- The `spec-self-eval` skill lives in `.codex/skills/spec-self-eval/` and `.agents/skills/spec-self-eval/`; use it to evaluate `.specs/<feature>/requirements.md`, `design.md`, and `tasks.md` against `.specs/_eval-checklist.md`
+- A Codex Stop hook is configured in `.codex/config.toml` and runs `.codex/hooks/spec-self-eval-on-stop.ps1` with status `Running spec-self-eval`
