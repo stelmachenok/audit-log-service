@@ -26,11 +26,7 @@ into small, independently shippable units.
 - The opaque cursor codec lives in the **API** layer (never in `domain`), per
   `design.md` §10.
 - Run `mvn spotless:apply` before each commit (`AGENTS.md` § Code style).
-
-
-## Definition of Done
-
-Each task is complete when its implementation compiles and `mvn verify` is green.
+- "DoD" items are written so each can be checked by a test or a `mvn verify` run.
 
 ---
 
@@ -50,6 +46,24 @@ persistence adapter using keyset (seek) pagination.
   combined with `AND`; keyset predicate `(timestamp, id) > (after.occurredAt, after.id)`
   when `after` is present; `ORDER BY timestamp ASC, id ASC`; `LIMIT = query.limit()`.
   `SELECT` only — no `INSERT`/`UPDATE`/`DELETE`, no triggers.
+
+**Refs.** `design.md` §4.1, §4.2, §4.3 (query shape), §6 (half-open range), §7,
+FR1–FR4, NFR, §10 (append-only / no side effects); `requirements.md` US2, US3.
+
+**DoD.**
+- `AuditEventPersistenceAdapterIT` (Testcontainers + PostgreSQL) proves:
+  - ascending order by `(timestamp, id)`, including a deterministic tie-break when two
+    rows share `timestamp`;
+  - `occurredAt == from` is included, `occurredAt == to` is excluded;
+  - `limit` caps the page size;
+  - paging with `after` set to the last row of page _n_ returns the rows strictly after
+    it — every matching row appears exactly once across pages, even when extra rows are
+    inserted between page fetches (append-only stability);
+  - each optional-filter subset (`actor`; `resourceType`; `resourceId`; `resourceType` +
+    `resourceId`; `actor` + a resource filter; none) returns exactly the matching rows;
+  - no rows are written/updated/deleted by a query (assert row count / timestamps
+    unchanged).
+- `HexagonalArchitectureTest` green; `mvn verify` green.
 
 **Dependencies.** None.
 
@@ -72,6 +86,20 @@ application-layer rules.
     `new AuditEventPage(events, events.size() == query.limit())`.
   - No writes; existing `findById` / `findByActor` behaviour unchanged.
 
+**Refs.** `design.md` §3 (`422` row), §3.1 (`INVALID_TIME_RANGE`), §4.3 (`nextCursor`
+present iff a full page was returned), §6 (`from > to`, max window), FR1–FR6, NFR, §10;
+`requirements.md` US1, US3, §4 ("maximum window" open question — superseded here).
+
+**DoD.**
+- `AuditEventService` unit tests:
+  - `from > to` ⇒ empty page, `hasMore == false`, `loadPort` **not** invoked;
+  - `to − from` exactly 90 days ⇒ allowed; just over ⇒ `InvalidTimeRangeException`;
+  - port returns `limit` rows ⇒ `hasMore == true`; fewer than `limit` ⇒ `hasMore == false`;
+  - the `AuditEventQuery` (all filters, `limit`, `after`) is passed through to the port
+    unchanged;
+  - no interaction with `SaveAuditEventPort`.
+- `HexagonalArchitectureTest` green; `mvn verify` green.
+
 **Dependencies.** T1 (uses `AuditEventQuery`, `KeysetPosition`, `LoadAuditEventPort.find`).
 
 ---
@@ -92,6 +120,18 @@ including a filter-set hash.
     independent of query-parameter order and of absent-vs-empty distinctions per the chosen
     normalization.
 - Pure code: no Spring, JPA, or HTTP types leaking into `domain`.
+
+**Refs.** `design.md` §3 (cursor `400` rows), §4.3 (cursor format & filter-hash check),
+§6 (cursor edge cases), §10 (codec lives in API/infra, not `domain`); `requirements.md` US3.
+
+**DoD.**
+- Unit tests:
+  - `encode` → `decode` round-trips a `KeysetPosition` exactly;
+  - garbage / non-base64url / truncated input ⇒ `InvalidCursorException`;
+  - unknown `v` ⇒ `InvalidCursorException`;
+  - a cursor decoded against a different filter set (hash mismatch) ⇒ `InvalidCursorException`;
+  - two filter sets that differ only in parameter order produce the **same** `f`.
+- `HexagonalArchitectureTest` green (no `domain` dependency on the codec).
 
 **Dependencies.** T1 (uses `KeysetPosition`). Can proceed in parallel with T2.
 
@@ -138,6 +178,31 @@ error contract from §3 / §3.1.
   - error responses mutate no persisted state.
 - The endpoint emits no audit event for the query itself (only standard request logging).
 
+**Refs.** `design.md` §2, §2.1, §2.2, §3, §3.1, §4.1, §4.3, §5, §6, §10;
+`requirements.md` US1, US2, US3, §3 (Out of scope — no `401`/`403`).
+
+**DoD.**
+- Controller / web-slice test + an end-to-end IT (Testcontainers) covering:
+  - valid `from`/`to` only ⇒ `200`, body shape per §5, results ascending, `payload`
+    pass-through, `actor.type == null`;
+  - each optional filter and a couple of combinations ⇒ `200`, correctly narrowed results;
+  - missing `from` or `to` ⇒ `400 MISSING_PARAMETER`;
+  - malformed instant / non-`Z` offset ⇒ `400 INVALID_INSTANT`;
+  - `limit` = `0`, `1001`, or non-integer ⇒ `400 INVALID_LIMIT`; `limit` = `1` and
+    `limit` = `1000` accepted;
+  - `from > to` ⇒ `200` with `{ "data": [], "nextCursor": null }`, even with a valid
+    `cursor` present;
+  - `to − from` > 90 days ⇒ `422 INVALID_TIME_RANGE` with the §3.1 body;
+  - garbage / wrong-version / filter-mismatched `cursor` ⇒ `400 INVALID_CURSOR`;
+  - pagination walk: first page returns a non-null `nextCursor`; feeding it back returns the
+    next rows with no overlap and no gap; the final page returns `nextCursor: null`; rows
+    inserted between fetches do not cause repeats or skips;
+  - the pre-existing `GET /api/v1/audit-events?actor=…` and `GET /api/v1/audit-events/{id}`
+    responses are unchanged;
+  - error responses leave the table unchanged (row count / timestamps).
+- `HexagonalArchitectureTest` green (API layer carries only syntactic validation +
+  cursor codec, no business logic); `mvn verify` green.
+
 **Dependencies.** T2 (use case + `AuditEventPage` + `InvalidTimeRangeException`),
 T3 (cursor codec).
 
@@ -152,6 +217,16 @@ indexes. DDL only — append-only-safe (no data mutation, no `UPDATE`/`DELETE`).
   - create (all columns `ASC`): `(timestamp, id)`, `(actor, timestamp, id)`,
     `(resource_type, timestamp, id)`, `(resource_id, timestamp, id)`;
   - drop `idx_audit_events_actor` and `idx_audit_events_timestamp` (superseded).
+
+**Refs.** `design.md` §7, §9 (queries index-backed under all filter combinations), §10
+(DDL-only ⇒ consistent with the append-only invariant); `requirements.md` US2, US3.
+
+**DoD.**
+- `V2` applies cleanly on a fresh Testcontainers PostgreSQL; all existing ITs (and the
+  T1/T4 query ITs) stay green.
+- A migration/index test (or `information_schema` / `pg_indexes` assertion) confirms the
+  four new indexes exist and the two old ones are gone.
+- No `INSERT`/`UPDATE`/`DELETE` in the migration; `mvn verify` green.
 
 **Dependencies.** None required to compile; **recommended after T1** so the index set is
 validated against the actual query shapes. Can otherwise ship in parallel.
