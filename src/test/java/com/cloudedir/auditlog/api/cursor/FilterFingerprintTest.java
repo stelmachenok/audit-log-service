@@ -4,6 +4,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatNullPointerException;
 
 import java.time.Instant;
+import java.util.List;
 import org.junit.jupiter.api.Test;
 
 class FilterFingerprintTest {
@@ -13,7 +14,7 @@ class FilterFingerprintTest {
 
   @Test
   void valueIsStableAcrossCalls() {
-    var fp = new FilterFingerprint(FROM, TO, "u_42", "order", "9f3b");
+    var fp = new FilterFingerprint(FROM, TO, List.of("u_42"), "order", "9f3b");
 
     assertThat(fp.value()).isEqualTo(fp.value());
   }
@@ -21,28 +22,30 @@ class FilterFingerprintTest {
   @Test
   void nullAndBlankActorAreTreatedAsAbsent() {
     var nullActor = new FilterFingerprint(FROM, TO, null, null, null);
-    var blankActor = new FilterFingerprint(FROM, TO, "  ", "", "\t");
+    var blankActor = new FilterFingerprint(FROM, TO, List.of("  ", "\t"), "", "\t");
 
     assertThat(blankActor.value()).isEqualTo(nullActor.value());
   }
 
   @Test
   void changingAnyFilterFieldChangesTheValue() {
-    var base = new FilterFingerprint(FROM, TO, "a", "DOC", "1");
+    var base = new FilterFingerprint(FROM, TO, List.of("a"), "DOC", "1");
 
-    assertThat(new FilterFingerprint(FROM.plusSeconds(1), TO, "a", "DOC", "1").value())
+    assertThat(new FilterFingerprint(FROM.plusSeconds(1), TO, List.of("a"), "DOC", "1").value())
         .isNotEqualTo(base.value());
-    assertThat(new FilterFingerprint(FROM, TO.plusSeconds(1), "a", "DOC", "1").value())
+    assertThat(new FilterFingerprint(FROM, TO.plusSeconds(1), List.of("a"), "DOC", "1").value())
         .isNotEqualTo(base.value());
-    assertThat(new FilterFingerprint(FROM, TO, "b", "DOC", "1").value()).isNotEqualTo(base.value());
-    assertThat(new FilterFingerprint(FROM, TO, "a", "FOLDER", "1").value())
+    assertThat(new FilterFingerprint(FROM, TO, List.of("b"), "DOC", "1").value())
         .isNotEqualTo(base.value());
-    assertThat(new FilterFingerprint(FROM, TO, "a", "DOC", "2").value()).isNotEqualTo(base.value());
+    assertThat(new FilterFingerprint(FROM, TO, List.of("a"), "FOLDER", "1").value())
+        .isNotEqualTo(base.value());
+    assertThat(new FilterFingerprint(FROM, TO, List.of("a"), "DOC", "2").value())
+        .isNotEqualTo(base.value());
   }
 
   @Test
   void presentVsAbsentActorChangesTheValue() {
-    var withActor = new FilterFingerprint(FROM, TO, "a", null, null);
+    var withActor = new FilterFingerprint(FROM, TO, List.of("a"), null, null);
     var withoutActor = new FilterFingerprint(FROM, TO, null, null, null);
 
     assertThat(withActor.value()).isNotEqualTo(withoutActor.value());
@@ -50,10 +53,34 @@ class FilterFingerprintTest {
 
   @Test
   void surroundingWhitespaceDoesNotAffectValue() {
-    var trimmed = new FilterFingerprint(FROM, TO, "actor", "DOC", "1");
-    var padded = new FilterFingerprint(FROM, TO, "  actor  ", "DOC", "1");
+    var trimmed = new FilterFingerprint(FROM, TO, List.of("actor"), "DOC", "1");
+    var padded = new FilterFingerprint(FROM, TO, List.of("  actor  "), "DOC", "1");
 
     assertThat(padded.value()).isEqualTo(trimmed.value());
+  }
+
+  @Test
+  void actorOrderDoesNotAffectValue() {
+    var ab = new FilterFingerprint(FROM, TO, List.of("a", "b"), null, null);
+    var ba = new FilterFingerprint(FROM, TO, List.of("b", "a"), null, null);
+
+    assertThat(ba.value()).isEqualTo(ab.value());
+  }
+
+  @Test
+  void duplicateActorsDoNotAffectValue() {
+    var distinct = new FilterFingerprint(FROM, TO, List.of("a", "b"), null, null);
+    var withDuplicates = new FilterFingerprint(FROM, TO, List.of("b", "a", "b"), null, null);
+
+    assertThat(withDuplicates.value()).isEqualTo(distinct.value());
+  }
+
+  @Test
+  void differentActorSetChangesTheValue() {
+    var ab = new FilterFingerprint(FROM, TO, List.of("a", "b"), null, null);
+    var ac = new FilterFingerprint(FROM, TO, List.of("a", "c"), null, null);
+
+    assertThat(ac.value()).isNotEqualTo(ab.value());
   }
 
   @Test
@@ -66,7 +93,7 @@ class FilterFingerprintTest {
 
   @Test
   void valueIsUrlSafeAndUnpadded() {
-    var value = new FilterFingerprint(FROM, TO, "actor", "DOC", "1").value();
+    var value = new FilterFingerprint(FROM, TO, List.of("actor"), "DOC", "1").value();
 
     assertThat(value).isNotEmpty();
     assertThat(value).matches("[A-Za-z0-9_-]+");

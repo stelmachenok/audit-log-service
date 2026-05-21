@@ -18,6 +18,11 @@ class ApiExceptionHandler {
     return body(HttpStatus.UNPROCESSABLE_ENTITY, "INVALID_TIME_RANGE", ex.getMessage());
   }
 
+  @ExceptionHandler(TooManyActorsException.class)
+  ResponseEntity<ErrorResponse> handle(TooManyActorsException ex) {
+    return body(HttpStatus.UNPROCESSABLE_ENTITY, "TOO_MANY_ACTORS", ex.getMessage());
+  }
+
   @ExceptionHandler(InvalidCursorException.class)
   ResponseEntity<ErrorResponse> handle(InvalidCursorException ex) {
     return body(HttpStatus.BAD_REQUEST, "INVALID_CURSOR", ex.getMessage());

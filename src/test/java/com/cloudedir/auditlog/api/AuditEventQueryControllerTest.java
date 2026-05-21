@@ -79,7 +79,7 @@ class AuditEventQueryControllerTest {
     var captor = ArgumentCaptor.forClass(AuditEventQuery.class);
     org.mockito.Mockito.verify(queryUseCase).query(captor.capture());
     var captured = captor.getValue();
-    assertThat(captured.actor()).isEqualTo("u_1");
+    assertThat(captured.actors()).containsExactly("u_1");
     assertThat(captured.resourceType()).isEqualTo("DOC");
     assertThat(captured.resourceId()).isEqualTo("doc-9");
     assertThat(captured.limit()).isEqualTo(50);
@@ -211,7 +211,8 @@ class AuditEventQueryControllerTest {
   @Test
   void filterMismatchedCursorYields400InvalidCursor() throws Exception {
     var differentFp =
-        new FilterFingerprint(Instant.parse(FROM), Instant.parse(TO), "other-actor", null, null);
+        new FilterFingerprint(
+            Instant.parse(FROM), Instant.parse(TO), List.of("other-actor"), null, null);
     var token =
         cursorCodec.encode(
             new KeysetPosition(Instant.parse("2026-01-02T00:00:00Z"), UUID.randomUUID()),
@@ -294,7 +295,7 @@ class AuditEventQueryControllerTest {
     var captor = ArgumentCaptor.forClass(AuditEventQuery.class);
     org.mockito.Mockito.verify(queryUseCase).query(captor.capture());
     var captured = captor.getValue();
-    assertThat(captured.actor()).isEqualTo("u_1");
+    assertThat(captured.actors()).containsExactly("u_1");
     assertThat(captured.resourceType()).isNull();
     assertThat(captured.resourceId()).isNull();
   }
@@ -306,7 +307,7 @@ class AuditEventQueryControllerTest {
     // request with the equivalent raw form actor="  u_1  ", normalization must produce the same
     // FilterFingerprint so the cursor decodes successfully.
     var canonicalFp =
-        new FilterFingerprint(Instant.parse(FROM), Instant.parse(TO), "u_1", null, null);
+        new FilterFingerprint(Instant.parse(FROM), Instant.parse(TO), List.of("u_1"), null, null);
     var token =
         cursorCodec.encode(
             new KeysetPosition(Instant.parse("2026-01-02T00:00:00Z"), UUID.randomUUID()),
@@ -334,7 +335,79 @@ class AuditEventQueryControllerTest {
 
     var captor = ArgumentCaptor.forClass(AuditEventQuery.class);
     org.mockito.Mockito.verify(queryUseCase).query(captor.capture());
-    assertThat(captor.getValue().actor()).isEqualTo("u_1");
+    assertThat(captor.getValue().actors()).containsExactly("u_1");
+  }
+
+  @Test
+  void multiActorListIsParsedAndPassedThrough() throws Exception {
+    when(queryUseCase.query(any())).thenReturn(new AuditEventPage(List.of(), false));
+
+    mockMvc
+        .perform(
+            get("/api/v1/audit-events").param("from", FROM).param("to", TO).param("actor", "a,b,c"))
+        .andExpect(status().isOk());
+
+    var captor = ArgumentCaptor.forClass(AuditEventQuery.class);
+    org.mockito.Mockito.verify(queryUseCase).query(captor.capture());
+    assertThat(captor.getValue().actors()).containsExactly("a", "b", "c");
+  }
+
+  @Test
+  void actorListIsTrimmedAndDeduplicated() throws Exception {
+    when(queryUseCase.query(any())).thenReturn(new AuditEventPage(List.of(), false));
+
+    mockMvc
+        .perform(
+            get("/api/v1/audit-events")
+                .param("from", FROM)
+                .param("to", TO)
+                .param("actor", "  a , , a , b "))
+        .andExpect(status().isOk());
+
+    var captor = ArgumentCaptor.forClass(AuditEventQuery.class);
+    org.mockito.Mockito.verify(queryUseCase).query(captor.capture());
+    assertThat(captor.getValue().actors()).containsExactly("a", "b");
+  }
+
+  @Test
+  void tenDistinctActorsAreAccepted() throws Exception {
+    when(queryUseCase.query(any())).thenReturn(new AuditEventPage(List.of(), false));
+
+    mockMvc
+        .perform(
+            get("/api/v1/audit-events")
+                .param("from", FROM)
+                .param("to", TO)
+                .param("actor", "a1,a2,a3,a4,a5,a6,a7,a8,a9,a10"))
+        .andExpect(status().isOk());
+  }
+
+  @Test
+  void elevenDistinctActorsYield422TooManyActors() throws Exception {
+    mockMvc
+        .perform(
+            get("/api/v1/audit-events")
+                .param("from", FROM)
+                .param("to", TO)
+                .param("actor", "a1,a2,a3,a4,a5,a6,a7,a8,a9,a10,a11"))
+        .andExpect(status().isUnprocessableEntity())
+        .andExpect(jsonPath("$.code").value("TOO_MANY_ACTORS"))
+        .andExpect(jsonPath("$.status").value(422));
+  }
+
+  @Test
+  void tooManyActorsIsCheckedBeforeCursorDecode() throws Exception {
+    // 11 actors AND a garbage cursor — the actor cap runs before the cursor decode (design.md §6),
+    // so the response is 422 TOO_MANY_ACTORS, not 400 INVALID_CURSOR.
+    mockMvc
+        .perform(
+            get("/api/v1/audit-events")
+                .param("from", FROM)
+                .param("to", TO)
+                .param("actor", "a1,a2,a3,a4,a5,a6,a7,a8,a9,a10,a11")
+                .param("cursor", "!!!not-base64!!!"))
+        .andExpect(status().isUnprocessableEntity())
+        .andExpect(jsonPath("$.code").value("TOO_MANY_ACTORS"));
   }
 
   private static AuditEvent sample(UUID id, Instant timestamp) {
