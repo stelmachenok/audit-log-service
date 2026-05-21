@@ -105,7 +105,7 @@ class AuditEventServiceTest {
     var from = Instant.parse("2020-01-01T00:00:00Z");
     var to = from.plus(Duration.ofDays(7));
     var cursor = new KeysetPosition(from.plusSeconds(1), UUID.randomUUID());
-    var query = new AuditEventQuery(from, to, "actor-1", "DOC", "doc-42", 25, cursor);
+    var query = new AuditEventQuery(from, to, List.of("actor-1"), "DOC", "doc-42", 25, cursor);
     when(loadPort.find(any())).thenReturn(List.of());
 
     service.query(query);

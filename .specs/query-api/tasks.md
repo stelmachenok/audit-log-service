@@ -17,6 +17,10 @@ into small, independently shippable units.
   - The §7 Flyway **V2** index migration is in scope (T5).
   - The 90-day max-window → HTTP `422` rule from `design.md` §6 is implemented (T2/T4),
     overriding the still-open "maximum window" question in `requirements.md` §4.
+  - The multi-actor `actor` filter from `design.md` §2.1/§2.2 is in scope: `actor`
+    accepts a comma-separated list of up to 10 distinct values (OR within the set);
+    more than 10, counted after trim + de-duplication, ⇒ HTTP `422 TOO_MANY_ACTORS`
+    (T1 query path, T3 cursor hash, T4 parsing + cap).
 
 ## Conventions
 
@@ -37,18 +41,22 @@ persistence adapter using keyset (seek) pagination.
 
 - Add records under `application.port.in`:
   - `KeysetPosition(Instant occurredAt, UUID id)`.
-  - `AuditEventQuery(Instant from, Instant to, String actor, String resourceType,
-    String resourceId, int limit, KeysetPosition after)` — `actor` / `resourceType` /
-    `resourceId` / `after` nullable; `limit` already validated by the caller.
+  - `AuditEventQuery(Instant from, Instant to, List<String> actors, String resourceType,
+    String resourceId, int limit, KeysetPosition after)` — `actors` is the normalized,
+    distinct actor set per `design.md` §2.2 (never `null`; an empty list = no `actor`
+    filter; at most 10 entries); `resourceType` / `resourceId` / `after` nullable;
+    `limit` already validated by the caller.
 - Add to `LoadAuditEventPort`: `List<AuditEvent> find(AuditEventQuery query)`.
 - Implement `find` in `AuditEventPersistenceAdapter` (+ repository support as needed):
   half-open range `timestamp >= from AND timestamp < to`; optional equality filters
-  combined with `AND`; keyset predicate `(timestamp, id) > (after.occurredAt, after.id)`
-  when `after` is present; `ORDER BY timestamp ASC, id ASC`; `LIMIT = query.limit()`.
-  `SELECT` only — no `INSERT`/`UPDATE`/`DELETE`, no triggers.
+  combined with `AND`, with a non-empty `actors` set contributing an `actor IN (…)`
+  term (`design.md` §4.3); keyset predicate `(timestamp, id) > (after.occurredAt,
+  after.id)` when `after` is present; `ORDER BY timestamp ASC, id ASC`;
+  `LIMIT = query.limit()`. `SELECT` only — no `INSERT`/`UPDATE`/`DELETE`, no triggers.
 
-**Refs.** `design.md` §4.1, §4.2, §4.3 (query shape), §6 (half-open range), §7,
-FR1–FR4, NFR, §10 (append-only / no side effects); `requirements.md` US2, US3.
+**Refs.** `design.md` §2.1, §2.2 (multi-actor filter), §4.1, §4.2, §4.3 (query shape),
+§6 (half-open range), §7, FR1–FR4, NFR, §10 (append-only / no side effects);
+`requirements.md` US1, US2, US3.
 
 **DoD.**
 - `AuditEventPersistenceAdapterIT` (Testcontainers + PostgreSQL) proves:
@@ -61,6 +69,9 @@ FR1–FR4, NFR, §10 (append-only / no side effects); `requirements.md` US2, US3
     inserted between page fetches (append-only stability);
   - each optional-filter subset (`actor`; `resourceType`; `resourceId`; `resourceType` +
     `resourceId`; `actor` + a resource filter; none) returns exactly the matching rows;
+  - a multi-value `actors` set returns rows whose `actor` matches **any** listed value
+    (OR within the set, AND with other filters); an empty `actors` list applies no
+    `actor` filter;
   - no rows are written/updated/deleted by a query (assert row count / timestamps
     unchanged).
 - `HexagonalArchitectureTest` green; `mvn verify` green.
@@ -118,11 +129,14 @@ including a filter-set hash.
   - `FilterFingerprint` (or an equivalent helper): canonical ordering + encoding of
     (`from`, `to`, `actor`, `resourceType`, `resourceId`) before hashing, so the hash is
     independent of query-parameter order and of absent-vs-empty distinctions per the chosen
-    normalization.
+    normalization. For `actor`, the fingerprint encodes the **sorted, de-duplicated**
+    actor set (`design.md` §4.3), so the hash is also independent of the order and
+    duplication of the supplied actor values.
 - Pure code: no Spring, JPA, or HTTP types leaking into `domain`.
 
-**Refs.** `design.md` §3 (cursor `400` rows), §4.3 (cursor format & filter-hash check),
-§6 (cursor edge cases), §10 (codec lives in API/infra, not `domain`); `requirements.md` US3.
+**Refs.** `design.md` §2.2 (actor-set normalization), §3 (cursor `400` rows), §4.3
+(cursor format & filter-hash check), §6 (cursor edge cases), §10 (codec lives in
+API/infra, not `domain`); `requirements.md` US3.
 
 **DoD.**
 - Unit tests:
@@ -130,7 +144,9 @@ including a filter-set hash.
   - garbage / non-base64url / truncated input ⇒ `InvalidCursorException`;
   - unknown `v` ⇒ `InvalidCursorException`;
   - a cursor decoded against a different filter set (hash mismatch) ⇒ `InvalidCursorException`;
-  - two filter sets that differ only in parameter order produce the **same** `f`.
+  - two filter sets that differ only in parameter order produce the **same** `f`;
+  - two `actor` lists that differ only in value order or in duplicate entries produce
+    the **same** `f` (e.g. `a,b` ≡ `b,a` ≡ `b,a,b`).
 - `HexagonalArchitectureTest` green (no `domain` dependency on the codec).
 
 **Dependencies.** T1 (uses `KeysetPosition`). Can proceed in parallel with T2.
@@ -147,13 +163,17 @@ error contract from §3 / §3.1.
   (`@GetMapping(params = {"from", "to"})`), so the existing `findByActor` handler (no
   `params` condition, requires `actor`) still serves `?actor=…` requests and the new
   handler serves `?from=…&to=…[&actor=…&resourceType=…&resourceId=…&cursor=…&limit=…]`.
-- Validation (all client-side failures → `400` except the window cap → `422`):
+- Validation (all client-side failures → `400` except the window cap and the
+  >10-actor cap → `422`); checks run in the `design.md` §6 precedence order:
   - `from` / `to` required ⇒ missing ⇒ `400 MISSING_PARAMETER`;
   - `from` / `to` must be ISO-8601 instants with the `Z` offset; any other value or a
     non-`Z` offset ⇒ `400 INVALID_INSTANT`;
   - `limit`: default `50`, integer in `[1, 1000]`; otherwise ⇒ `400 INVALID_LIMIT`;
-  - `actor` / `resourceType` / `resourceId`: optional exact-match strings, AND-combined,
-    any subset allowed;
+  - `actor`: optional comma-separated list — split on `,`, trim each element, drop
+    blank elements, de-duplicate into a distinct set (`design.md` §2.2); more than 10
+    entries ⇒ `422 TOO_MANY_ACTORS`; an empty set ⇒ no `actor` filter. `resourceType`
+    / `resourceId`: optional exact-match strings. All filters AND-combined, any subset
+    allowed (the `actor` set is matched OR-internally);
   - `cursor`: optional; when present, decode via `CursorCodec` against the request's filter
     fingerprint; undecodable / unknown version / filter-hash mismatch ⇒ `400 INVALID_CURSOR`;
     a valid cursor combined with `from > to` still yields the `200` empty page (T2 rule wins).
@@ -172,6 +192,8 @@ error contract from §3 / §3.1.
 - Error handling (`@RestControllerAdvice`, new or extending the existing one):
   - `InvalidTimeRangeException` ⇒ `422` with `{ "code": "INVALID_TIME_RANGE", "message": …,
     "status": 422 }`;
+  - the >10-actor cap ⇒ `422` with `{ "code": "TOO_MANY_ACTORS", "message": …,
+    "status": 422 }`, raised in the API layer as a syntactic-validation failure;
   - the `400` cases above ⇒ `400` with `{ "code": <stable code>, "message": …,
     "status": 400 }` (codes: `MISSING_PARAMETER`, `INVALID_INSTANT`, `INVALID_LIMIT`,
     `INVALID_CURSOR`);
@@ -193,6 +215,10 @@ error contract from §3 / §3.1.
   - `from > to` ⇒ `200` with `{ "data": [], "nextCursor": null }`, even with a valid
     `cursor` present;
   - `to − from` > 90 days ⇒ `422 INVALID_TIME_RANGE` with the §3.1 body;
+  - a comma-separated `actor` list ⇒ `200`, results include events matching **any**
+    listed actor; whitespace, blank, and duplicate entries are trimmed and collapsed;
+  - exactly 10 distinct actors accepted; 11 distinct actors ⇒ `422 TOO_MANY_ACTORS`
+    with the §3.1 body;
   - garbage / wrong-version / filter-mismatched `cursor` ⇒ `400 INVALID_CURSOR`;
   - pagination walk: first page returns a non-null `nextCursor`; feeding it back returns the
     next rows with no overlap and no gap; the final page returns `nextCursor: null`; rows
@@ -249,14 +275,15 @@ time after T1).
 
 | Item | Covered by |
 | --- | --- |
-| US1 — exact `actor` + `[from, to)`; optional resource narrowing; no-match ⇒ `200` empty; no state change | T1 (filters, range), T2 (empty page, no writes), T4 (`200` body) |
+| US1 — `actor` (single value or ≤10-value list, OR within the set) + `[from, to)`; optional resource narrowing; >10 actors ⇒ `422`; no-match ⇒ `200` empty; no state change | T1 (filters incl. `actor IN`, range), T2 (empty page, no writes), T4 (list parsing, 10-actor cap, `200` body) |
 | US2 — full resource timeline in `[from, to)`; ascending; deterministic tie-break; `from`-inclusive / `to`-exclusive | T1 (`ORDER BY timestamp, id`, half-open range, tie-break IT) |
-| US3 — exactly-once pagination under concurrent appends; last page ⇒ `nextCursor: null`; malformed cursor ⇒ `400` | T1 (keyset stability IT), T2 (`hasMore`), T3 (codec + hash check), T4 (`nextCursor`, `400 INVALID_CURSOR`, pagination IT) |
+| US3 — exactly-once pagination under concurrent appends; last page ⇒ `nextCursor: null`; malformed cursor ⇒ `400`; cursor stable across actor-list order/duplicates | T1 (keyset stability IT), T2 (`hasMore`), T3 (codec + hash over sorted actor set), T4 (`nextCursor`, `400 INVALID_CURSOR`, pagination IT) |
 | `design.md` §2 endpoint & query params | T4 |
-| §3 / §3.1 status codes & error body (`400` family, `422`, `200`-only success) | T2 (`422` source), T4 (validation + advice) |
+| §2.1 / §2.2 multi-actor filter — comma-separated list, trim/dedup, OR within set, ≤10 cap | T4 (parse + cap + `422`), T1 (`actor IN` query), T3 (actor-set filter hash) |
+| §3 / §3.1 status codes & error body (`400` family, `422` incl. `TOO_MANY_ACTORS`, `200`-only success) | T2 (`422 INVALID_TIME_RANGE` source), T4 (validation incl. `422 TOO_MANY_ACTORS` + advice) |
 | §4 sorting, keyset pagination, cursor format & filter hash | T1 (sort + keyset SQL), T3 (cursor encoding/decoding/hash), T4 (cursor wiring) |
 | §5 response body & empty-result representation | T4 |
-| §6 validation rules & edge cases (`from > to`, 90-day cap, `limit`, half-open, cursor) | T1, T2, T4 |
+| §6 validation rules & edge cases (`from > to`, 90-day cap, 10-actor cap, `limit`, half-open, cursor) | T1, T2, T4 |
 | §7 indexes for all filter combinations | T5 |
 | §8 functional requirements FR1–FR6 | T1 (FR1–FR4), T2 (FR5–FR6), T4 (FR5) |
 | §9 / §10 non-functional + `AGENTS.md` invariants (append-only, server-only `timestamp`, mandatory `actor`, no read side effects, architecture) | T1 (SELECT-only IT), T2 (no writes), T4 (no audit event for the query; layering), T5 (DDL-only) |

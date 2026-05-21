@@ -14,8 +14,8 @@ public final class AuditEventSpecifications {
       var predicates = new ArrayList<Predicate>();
       predicates.add(cb.greaterThanOrEqualTo(root.get("timestamp"), q.from()));
       predicates.add(cb.lessThan(root.get("timestamp"), q.to()));
-      if (q.actor() != null) {
-        predicates.add(cb.equal(root.get("actor"), q.actor()));
+      if (!q.actors().isEmpty()) {
+        predicates.add(root.get("actor").in(q.actors()));
       }
       if (q.resourceType() != null) {
         predicates.add(cb.equal(root.get("resourceType"), q.resourceType()));

@@ -5,15 +5,16 @@ import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.time.Instant;
 import java.util.Base64;
+import java.util.List;
 import java.util.Objects;
 
 public record FilterFingerprint(
-    Instant from, Instant to, String actor, String resourceType, String resourceId) {
+    Instant from, Instant to, List<String> actors, String resourceType, String resourceId) {
 
   public FilterFingerprint {
     Objects.requireNonNull(from, "from is mandatory");
     Objects.requireNonNull(to, "to is mandatory");
-    actor = normalize(actor);
+    actors = normalizeActors(actors);
     resourceType = normalize(resourceType);
     resourceId = normalize(resourceId);
   }
@@ -25,7 +26,7 @@ public record FilterFingerprint(
             + "\nto="
             + to
             + "\nactor="
-            + actor
+            + String.join(",", actors)
             + "\nresourceType="
             + resourceType
             + "\nresourceId="
@@ -37,6 +38,22 @@ public record FilterFingerprint(
     } catch (NoSuchAlgorithmException e) {
       throw new IllegalStateException("SHA-256 not available", e);
     }
+  }
+
+  /**
+   * Normalizes the actor set so the fingerprint is independent of the order and duplication of the
+   * supplied values: drops null/blank entries, trims, de-duplicates, and sorts ascending.
+   */
+  private static List<String> normalizeActors(List<String> raw) {
+    if (raw == null) {
+      return List.of();
+    }
+    return raw.stream()
+        .filter(a -> a != null && !a.isBlank())
+        .map(String::trim)
+        .distinct()
+        .sorted()
+        .toList();
   }
 
   private static String normalize(String v) {

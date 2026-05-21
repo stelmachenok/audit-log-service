@@ -208,6 +208,48 @@ class AuditEventQueryControllerIT {
     assertThat(afterTimestamps).isEqualTo(beforeTimestamps);
   }
 
+  @Test
+  void multiActorQueryReturnsEventsForAnyListedActor() {
+    var actorA = uniqueActor();
+    var actorB = uniqueActor();
+    var actorC = uniqueActor();
+    var seededA = seedRows(actorA, "DOC", "doc-1", 2);
+    seedRows(actorC, "DOC", "doc-1", 2); // in range, but excluded by the actor filter
+    var seededB = seedRows(actorB, "DOC", "doc-1", 2);
+    var from = seededA.get(0).timestamp().minusSeconds(1);
+    var to = seededB.get(seededB.size() - 1).timestamp().plusSeconds(1);
+
+    var response =
+        restTemplate.getForEntity(
+            queryUrl(from, to, actorA + "," + actorB, null, null, null, null), String.class);
+
+    assertThat(response.getStatusCode()).isEqualTo(HttpStatus.OK);
+    var body = parseQuery(response.getBody());
+    assertThat(body.data())
+        .extracting("id")
+        .containsExactly(
+            seededA.get(0).id(), seededA.get(1).id(), seededB.get(0).id(), seededB.get(1).id());
+  }
+
+  @Test
+  void elevenActorsYields422TooManyActors() {
+    var actors = new ArrayList<String>();
+    for (int i = 0; i < 11; i++) {
+      actors.add(uniqueActor());
+    }
+    var from = Instant.parse("2026-01-01T00:00:00Z");
+    var to = Instant.parse("2026-01-08T00:00:00Z");
+
+    var response =
+        restTemplate.getForEntity(
+            queryUrl(from, to, String.join(",", actors), null, null, null, null), String.class);
+
+    assertThat(response.getStatusCode()).isEqualTo(HttpStatus.UNPROCESSABLE_ENTITY);
+    var error = parseError(response.getBody());
+    assertThat(error.code()).isEqualTo("TOO_MANY_ACTORS");
+    assertThat(error.status()).isEqualTo(422);
+  }
+
   // --- helpers ---
 
   private List<AuditEventResponse> seedRows(

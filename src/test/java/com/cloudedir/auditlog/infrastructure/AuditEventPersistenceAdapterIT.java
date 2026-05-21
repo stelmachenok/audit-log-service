@@ -62,7 +62,8 @@ class AuditEventPersistenceAdapterIT {
     adapter.save(tied2);
     adapter.save(tied1);
 
-    var query = new AuditEventQuery(base, base.plusSeconds(60), actor, null, null, 10, null);
+    var query =
+        new AuditEventQuery(base, base.plusSeconds(60), List.of(actor), null, null, 10, null);
 
     var firstCall = adapter.find(query);
     var secondCall = adapter.find(query);
@@ -87,7 +88,7 @@ class AuditEventPersistenceAdapterIT {
     adapter.save(inside);
     adapter.save(atTo);
 
-    var result = adapter.find(new AuditEventQuery(from, to, actor, null, null, 10, null));
+    var result = adapter.find(new AuditEventQuery(from, to, List.of(actor), null, null, 10, null));
 
     assertThat(result)
         .extracting(AuditEvent::id)
@@ -106,7 +107,7 @@ class AuditEventPersistenceAdapterIT {
               UUID.randomUUID(), actor, "LOGIN", "SESSION", null, null, from.plusSeconds(i)));
     }
 
-    var result = adapter.find(new AuditEventQuery(from, to, actor, null, null, 3, null));
+    var result = adapter.find(new AuditEventQuery(from, to, List.of(actor), null, null, 3, null));
 
     assertThat(result).hasSize(3);
   }
@@ -133,7 +134,8 @@ class AuditEventPersistenceAdapterIT {
     page2Rows.forEach(adapter::save);
 
     var k = 2;
-    var firstPage = adapter.find(new AuditEventQuery(from, to, actor, null, null, k, null));
+    var firstPage =
+        adapter.find(new AuditEventQuery(from, to, List.of(actor), null, null, k, null));
     assertThat(firstPage).hasSize(k);
 
     // Concurrent appends after page 1 is read but before page 2 is read. Two of these land before
@@ -170,7 +172,8 @@ class AuditEventPersistenceAdapterIT {
     var lastOfPage1 = firstPage.get(firstPage.size() - 1);
     var cursor = new KeysetPosition(lastOfPage1.timestamp(), lastOfPage1.id());
 
-    var secondPage = adapter.find(new AuditEventQuery(from, to, actor, null, null, k, cursor));
+    var secondPage =
+        adapter.find(new AuditEventQuery(from, to, List.of(actor), null, null, k, cursor));
 
     assertThat(secondPage)
         .extracting(AuditEvent::id)
@@ -185,7 +188,8 @@ class AuditEventPersistenceAdapterIT {
     seen.addAll(firstPage.stream().map(AuditEvent::id).toList());
     var pageCursor = cursor;
     while (true) {
-      var page = adapter.find(new AuditEventQuery(from, to, actor, null, null, k, pageCursor));
+      var page =
+          adapter.find(new AuditEventQuery(from, to, List.of(actor), null, null, k, pageCursor));
       if (page.isEmpty()) break;
       page.forEach(e -> seen.add(e.id()));
       var last = page.get(page.size() - 1);
@@ -242,7 +246,8 @@ class AuditEventPersistenceAdapterIT {
     assertThat(idsOf(rangeOnly)).containsAll(allFour); // all four rows are visible via range alone
 
     // (a) actor only
-    var byActor = adapter.find(new AuditEventQuery(from, to, actor, null, null, 100, null));
+    var byActor =
+        adapter.find(new AuditEventQuery(from, to, List.of(actor), null, null, 100, null));
     assertThat(idsOf(byActor))
         .containsExactlyInAnyOrder(
             match.id(), sameActorOtherResource.id(), differentResourceType.id());
@@ -266,8 +271,45 @@ class AuditEventPersistenceAdapterIT {
 
     // (e) actor + resource filter
     var byActorAndResource =
-        adapter.find(new AuditEventQuery(from, to, actor, "DOC", "doc-1", 100, null));
+        adapter.find(new AuditEventQuery(from, to, List.of(actor), "DOC", "doc-1", 100, null));
     assertThat(idsOf(byActorAndResource)).containsExactly(match.id());
+
+    // (f) multi-actor — matches any actor in the set, excludes actors outside it
+    var byActorSet =
+        adapter.find(
+            new AuditEventQuery(from, to, List.of(actor, otherActor), null, null, 100, null));
+    assertThat(idsOf(byActorSet))
+        .containsExactlyInAnyOrder(
+            match.id(),
+            sameActorOtherResource.id(),
+            otherActorSameResource.id(),
+            differentResourceType.id());
+  }
+
+  @Test
+  void findMatchesAnyActorInTheSetAndExcludesOthers() {
+    var actorA = "actor-a-" + UUID.randomUUID();
+    var actorB = "actor-b-" + UUID.randomUUID();
+    var actorC = "actor-c-" + UUID.randomUUID();
+    var from = Instant.parse("2020-07-01T00:00:00Z");
+    var to = from.plusSeconds(3600);
+    var rowA =
+        new AuditEvent(
+            UUID.randomUUID(), actorA, "LOGIN", "SESSION", null, null, from.plusSeconds(1));
+    var rowB =
+        new AuditEvent(
+            UUID.randomUUID(), actorB, "LOGIN", "SESSION", null, null, from.plusSeconds(2));
+    var rowC =
+        new AuditEvent(
+            UUID.randomUUID(), actorC, "LOGIN", "SESSION", null, null, from.plusSeconds(3));
+    adapter.save(rowA);
+    adapter.save(rowB);
+    adapter.save(rowC);
+
+    var result =
+        adapter.find(new AuditEventQuery(from, to, List.of(actorA, actorB), null, null, 100, null));
+
+    assertThat(idsOf(result)).containsExactly(rowA.id(), rowB.id()).doesNotContain(rowC.id());
   }
 
   @Test
@@ -282,7 +324,8 @@ class AuditEventPersistenceAdapterIT {
     var countBefore = repository.count();
     var beforeTimestamp = repository.findById(seeded.id()).orElseThrow().getTimestamp();
 
-    adapter.find(new AuditEventQuery(from, from.plusSeconds(3600), actor, null, null, 10, null));
+    adapter.find(
+        new AuditEventQuery(from, from.plusSeconds(3600), List.of(actor), null, null, 10, null));
 
     assertThat(repository.count()).isEqualTo(countBefore);
     assertThat(repository.findById(seeded.id()).orElseThrow().getTimestamp())

@@ -6,6 +6,7 @@ import com.cloudedir.auditlog.api.dto.AuditEventQueryResponse;
 import com.cloudedir.auditlog.api.dto.AuditEventResponse;
 import com.cloudedir.auditlog.api.dto.RecordAuditEventRequest;
 import com.cloudedir.auditlog.api.error.InvalidRequestException;
+import com.cloudedir.auditlog.api.error.TooManyActorsException;
 import com.cloudedir.auditlog.api.mapper.AuditEventApiMapper;
 import com.cloudedir.auditlog.application.port.in.AuditEventQuery;
 import com.cloudedir.auditlog.application.port.in.KeysetPosition;
@@ -13,6 +14,7 @@ import com.cloudedir.auditlog.application.port.in.QueryAuditEventUseCase;
 import com.cloudedir.auditlog.application.port.in.RecordAuditEventUseCase;
 import com.cloudedir.auditlog.domain.model.AuditEvent;
 import jakarta.validation.Valid;
+import java.util.Arrays;
 import java.util.List;
 import java.util.UUID;
 import org.springframework.http.HttpStatus;
@@ -28,6 +30,9 @@ import org.springframework.web.bind.annotation.RestController;
 @RestController
 @RequestMapping("/api/v1/audit-events")
 class AuditEventController {
+
+  /** Maximum number of distinct {@code actor} values accepted on a single query (design.md §6). */
+  private static final int MAX_ACTORS = 10;
 
   private final RecordAuditEventUseCase recordUseCase;
   private final QueryAuditEventUseCase queryUseCase;
@@ -65,7 +70,7 @@ class AuditEventController {
   AuditEventQueryResponse query(
       @RequestParam(required = false) String from,
       @RequestParam(required = false) String to,
-      @RequestParam(required = false) String actor,
+      @RequestParam(required = false) List<String> actor,
       @RequestParam(required = false) String resourceType,
       @RequestParam(required = false) String resourceId,
       @RequestParam(required = false) String cursor,
@@ -77,16 +82,17 @@ class AuditEventController {
       throw new InvalidRequestException("INVALID_LIMIT", "limit must be in [1, 1000].");
     }
 
-    var normActor = normalize(actor);
+    var actors = normalizeActors(actor);
+    if (actors.size() > MAX_ACTORS) {
+      throw new TooManyActorsException("actor accepts at most " + MAX_ACTORS + " distinct values.");
+    }
     var normResourceType = normalize(resourceType);
     var normResourceId = normalize(resourceId);
 
-    var fingerprint =
-        new FilterFingerprint(fromTs, toTs, normActor, normResourceType, normResourceId);
+    var fingerprint = new FilterFingerprint(fromTs, toTs, actors, normResourceType, normResourceId);
     KeysetPosition after = (cursor == null) ? null : cursorCodec.decode(cursor, fingerprint);
     var query =
-        new AuditEventQuery(
-            fromTs, toTs, normActor, normResourceType, normResourceId, limit, after);
+        new AuditEventQuery(fromTs, toTs, actors, normResourceType, normResourceId, limit, after);
 
     var page = queryUseCase.query(query);
     String nextCursor =
@@ -97,6 +103,24 @@ class AuditEventController {
   private static KeysetPosition lastPosition(List<AuditEvent> events) {
     var last = events.get(events.size() - 1);
     return new KeysetPosition(last.timestamp(), last.id());
+  }
+
+  /**
+   * Normalizes the {@code actor} query parameter into a distinct set: splits any element on {@code
+   * ,} (defensive — Spring already splits a single comma-separated value), trims each element,
+   * drops blank elements, and de-duplicates. An absent or all-blank value yields an empty set,
+   * which means "no actor filter".
+   */
+  private static List<String> normalizeActors(List<String> raw) {
+    if (raw == null) {
+      return List.of();
+    }
+    return raw.stream()
+        .flatMap(v -> Arrays.stream(v.split(",", -1)))
+        .map(String::trim)
+        .filter(s -> !s.isEmpty())
+        .distinct()
+        .toList();
   }
 
   private static String normalize(String v) {

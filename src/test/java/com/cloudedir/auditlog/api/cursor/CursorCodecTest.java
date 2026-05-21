@@ -8,6 +8,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import java.nio.charset.StandardCharsets;
 import java.time.Instant;
 import java.util.Base64;
+import java.util.List;
 import java.util.UUID;
 import org.junit.jupiter.api.Test;
 
@@ -20,7 +21,7 @@ class CursorCodecTest {
       new FilterFingerprint(
           Instant.parse("2020-01-01T00:00:00Z"),
           Instant.parse("2020-01-08T00:00:00Z"),
-          "actor-1",
+          List.of("actor-1"),
           "DOC",
           "doc-1");
 
@@ -97,7 +98,7 @@ class CursorCodecTest {
     var fpA = FP;
     var fpB =
         new FilterFingerprint(
-            fpA.from(), fpA.to(), "different-actor", fpA.resourceType(), fpA.resourceId());
+            fpA.from(), fpA.to(), List.of("different-actor"), fpA.resourceType(), fpA.resourceId());
     var token = codec.encode(new KeysetPosition(Instant.now(), UUID.randomUUID()), fpA);
 
     assertThatThrownBy(() -> codec.decode(token, fpB))
