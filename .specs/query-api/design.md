@@ -45,7 +45,7 @@ GET /api/v1/audit-events
 | -------------- | ---------------------- | -------- | ------------------------------------------------------------------------- |
 | `from`         | ISO-8601 instant (UTC) | Yes      | Inclusive lower bound of `occurredAt`.                                     |
 | `to`           | ISO-8601 instant (UTC) | Yes      | Exclusive upper bound of `occurredAt`.                                     |
-| `actor`        | string                 | No       | Exact match on actor identifier.                                          |
+| `actor`        | comma-separated list   | No       | Exact match on actor identifier; accepts a comma-separated list of up to 10 distinct values. An event matches if its `actor` equals **any** listed value. |
 | `resourceType` | string                 | No       | Exact match on resource type (e.g. `order`).                              |
 | `resourceId`   | string                 | No       | Exact match on resource identifier (e.g. `9f3b…`).                        |
 | `cursor`       | string                 | No       | Opaque pagination token returned by a previous call. Absent = first page. |
@@ -58,14 +58,24 @@ GET /api/v1/audit-events
 - `resourceType` and `resourceId` are independent and may be supplied
   individually or together.
 - All filters are combined with logical AND.
-- All filters are exact-match (no ranges or partial matches on `actor`,
-  `resourceType`, `resourceId`).
+- **Multi-actor filter.** `actor` accepts a comma-separated list. The raw value
+  is split on `,`; each element is trimmed; empty / whitespace-only elements are
+  discarded; the remaining elements are de-duplicated. The result is a set of
+  distinct actor values matched with logical **OR** (an event matches if its
+  `actor` equals any of them), and that OR set is `AND`-combined with every other
+  filter. A list that normalizes to an **empty** set — absent, empty, or only
+  blank elements (`?actor=`, `?actor=,,`) — is treated as **no filter on
+  `actor`**. The set is capped at 10 distinct values (§6).
+- All filters are exact-match: no ranges or partial matches on `actor`,
+  `resourceType`, or `resourceId`. The multi-actor list is still exact-match —
+  exact equality per element, evaluated as set membership, not a prefix or range.
 - **Value normalization.** Filter values are trimmed of leading/trailing
   whitespace before use, and an `actor` / `resourceType` / `resourceId` that is
   absent, empty, or whitespace-only is treated as **no filter on that field** (not
-  as a filter on the empty string). The exact same normalization is applied both
-  when building the SQL query and when computing the cursor filter hash (§4.3), so
-  the two can never disagree.
+  as a filter on the empty string); for `actor` this applies per element, as
+  described above. The exact same normalization is applied both when building the
+  SQL query and when computing the cursor filter hash (§4.3), so the two can never
+  disagree.
 
 ### 2.3. Coexistence with the legacy `?actor=` handler
 
@@ -73,7 +83,8 @@ A `GET /api/v1/audit-events?actor=…` handler predates this contract and is
 **retained**. Selection between the two is by query parameters:
 
 - both `from` and `to` present ⇒ the **paginated contract** in this document
-  (`actor`, if also supplied, is just one more optional equality filter);
+  (`actor`, if also supplied, is just one more optional filter — a single value
+  or a comma-separated list, §2.2);
 - `actor` present but **not** both bounds ⇒ the **legacy actor-only handler**,
   which returns the actor's events in its own (pre-existing) shape.
 
@@ -98,14 +109,15 @@ error — mutates persisted state (see §10).
 | `cursor` malformed / undecodable / unknown version                                                          | `400`  | error body                                      |
 | `cursor` whose embedded filter hash does not match the current filter set (see §4.3)                        | `400`  | error body                                      |
 | Requested time window `to − from` exceeds the 90-day cap (see §6)                                           | `422`  | error body                                      |
+| More than 10 distinct `actor` values supplied, counted after normalization (see §6)                         | `422`  | error body                                      |
 
 Notes:
 
 - `200` is the *only* success status; the empty-result case, the "page after the
   last record" case, and the `from > to` case all return `200`, never an error.
-- `422` is used *exclusively* for the over-cap time window. Every other
-  client-side problem is `400`. (`from > to` is **not** a `422` — it is a valid
-  request with an empty result.)
+- `422` is used for exactly two conditions: the over-cap time window and more
+  than 10 distinct `actor` values. Every other client-side problem is `400`.
+  (`from > to` is **not** a `422` — it is a valid request with an empty result.)
 - Authentication and authorization are out of scope; no `401`/`403` contract is
   defined here. Rate limiting (`429`) is an Open Question in `requirements.md`.
 - The "`from` or `to` missing ⇒ `400`" row assumes no `actor` is present. A request
@@ -129,7 +141,8 @@ Client errors return a small, stable, problem-style JSON object:
 ```
 
 - `code` — a stable machine-readable identifier (e.g. `MISSING_PARAMETER`,
-  `INVALID_INSTANT`, `INVALID_LIMIT`, `INVALID_CURSOR`, `INVALID_TIME_RANGE`).
+  `INVALID_INSTANT`, `INVALID_LIMIT`, `INVALID_CURSOR`, `INVALID_TIME_RANGE`,
+  `TOO_MANY_ACTORS`).
 - `message` — a human-readable explanation; not contractually stable.
 - `status` — echoes the HTTP status code.
 
@@ -150,6 +163,12 @@ events — so it cannot by itself define a stable page boundary. `id` is a rando
 needs. The pair `(occurredAt, id)` is therefore a total order over the rows, so two
 requests for the same page always yield the identical sequence (satisfies User
 Story 2 and the "same page → same sequence" requirement in User Story 3).
+
+A multi-actor filter does not affect this. An `actor` set rendered as `actor IN
+(…)` (§4.3) changes only *which* rows match, never their relative order, so the
+`(occurredAt, id)` total order and the deterministic tie-break — and hence the
+"same page → same sequence" guarantee — hold unchanged for single-actor and
+multi-actor queries alike.
 
 ### 4.2. Pagination strategy — keyset, not offset
 
@@ -203,13 +222,20 @@ zero.
   - take the five filter inputs in the fixed order `from`, `to`, `actor`,
     `resourceType`, `resourceId`;
   - normalize each value per §2.2 (trim; absent / empty / whitespace-only ⇒ the
-    empty value);
+    empty value); for `actor`, normalize the list per §2.2 — split on `,`, trim
+    each element, drop blank elements, de-duplicate — then **sort the distinct
+    values ascending and join them with `,`**, so the rendered value is
+    independent of the order in which actors were supplied and of duplicate
+    entries;
   - render each as `name=value` and join the five with `\n`;
   - hash that string with **SHA-256** and base64url-encode the digest (no padding).
 
-  Because the order is fixed, the hash is independent of query-parameter order; and
-  because it uses the same normalization as the actual query (§2.2), a cursor whose
-  `f` matches always describes the same SQL filter.
+  Because the order is fixed and the `actor` set is sorted, the hash is
+  independent of query-parameter order and of actor-list order/duplicates; and
+  because it uses the same normalization as the actual query (§2.2), a cursor
+  whose `f` matches always describes the same SQL filter. This is what makes a
+  `nextCursor` reusable when the same set of actors is re-supplied in any order
+  (User Story 3).
 - Given a `cursor`, the next page is:
 
   ```
@@ -219,6 +245,8 @@ zero.
   LIMIT <limit>
   ```
 
+  Here `<filters>` is the `AND` of the active filters; a multi-actor `actor`
+  filter contributes an `actor IN (?, ?, …)` term (§2.2).
   The row-value comparison `(occurredAt, id) > (?, ?)` may be lowered to the
   equivalent boolean form `occurredAt > ? OR (occurredAt = ? AND id > ?)` on stacks
   without a row-value operator; the two are semantically identical.
@@ -246,13 +274,15 @@ These types carry the query and its result across the API → application →
 persistence boundary. They are internal (not part of the wire contract), but the
 shapes are fixed here so the layers agree:
 
-- `AuditEventQuery(Instant from, Instant to, String actor, String resourceType,
-  String resourceId, int limit, KeysetPosition after)` — `from` and `to` non-null;
-  `actor` / `resourceType` / `resourceId` already normalized per §2.2 (so `null`
-  there means "no filter on that field"); `limit` already validated to `[1, 1000]`
-  by the API layer; `after` non-null only when the request carried a valid
-  `cursor`. The persistence adapter trusts these fields and does not re-validate
-  them.
+- `AuditEventQuery(Instant from, Instant to, List<String> actors, String
+  resourceType, String resourceId, int limit, KeysetPosition after)` — `from` and
+  `to` non-null; `actors` is the normalized, distinct, de-duplicated set of actor
+  values per §2.2 (an **empty** list means "no filter on `actor`"; it is never
+  `null` and never larger than 10 entries); `resourceType` / `resourceId` already
+  normalized per §2.2 (so `null` there means "no filter on that field"); `limit`
+  already validated to `[1, 1000]` by the API layer; `after` non-null only when
+  the request carried a valid `cursor`. The persistence adapter trusts these
+  fields and does not re-validate them.
 - `KeysetPosition(Instant occurredAt, UUID id)` — both non-null; the `(occurredAt,
   id)` of the last row of the previous page (the decoded cursor boundary).
 - `AuditEventPage(List<AuditEvent> events, boolean hasMore)` — `events` is the page
@@ -327,6 +357,13 @@ page after the last record.
   "maximum `from`/`to` window" Open Question in `requirements.md`, pending product
   sign-off; it is a fixed constant in the application layer (not configuration). If
   the value changes, only this section and the §3 table change.
+- **Maximum actors.** The `actor` filter accepts at most **10 distinct** values.
+  The raw comma-separated value is split, trimmed, emptied of blank elements, and
+  de-duplicated (§2.2); if the resulting set has more than 10 entries the request
+  is rejected with `422` (`code: TOO_MANY_ACTORS`). A set of exactly 10 is
+  allowed. Duplicate and blank entries do not count toward the cap, so
+  `?actor=a,a,` is one actor. The rejection alters no persisted state. Like the
+  90-day cap, the 10-actor limit is a fixed constant, not configuration.
 - **Empty filters.** A request with only `from` and `to` (no `actor`,
   `resourceType`, or `resourceId`) is valid and returns every event whose
   `occurredAt` is in `[from, to)`, paginated normally.
@@ -339,15 +376,19 @@ page after the last record.
   `from > to` still ⇒ `200` empty page. Cursor lifetime/reuse remains an Open
   Question in `requirements.md`.
 - **Validation precedence.** The API layer runs syntactic checks in this order:
-  parse `from` / `to` → check `limit` → compute the filter fingerprint → decode
-  `cursor` → invoke the use case (which then applies `from > to` and the 90-day
-  cap). Consequence: a malformed `cursor` is reported (`400 INVALID_CURSOR`) even
-  when `from > to` would otherwise have produced a `200` empty page; a valid
-  `cursor` with `from > to` still yields the `200` empty page (`after` is ignored
-  in that case).
-- **Filter normalization.** `actor` / `resourceType` / `resourceId` are trimmed,
-  and an empty or whitespace-only value is treated as absent (§2.2) — for both the
-  query and the cursor filter hash (§4.3).
+  parse `from` / `to` → check `limit` → normalize the `actor` list and check the
+  10-actor cap → compute the filter fingerprint → decode `cursor` → invoke the
+  use case (which then applies `from > to` and the 90-day cap). Consequence: a
+  malformed `cursor` is reported (`400 INVALID_CURSOR`) even when `from > to`
+  would otherwise have produced a `200` empty page; a valid `cursor` with
+  `from > to` still yields the `200` empty page (`after` is ignored in that
+  case); and `> 10` actors is rejected (`422 TOO_MANY_ACTORS`) before the
+  `cursor` is decoded.
+- **Filter normalization.** `resourceType` / `resourceId` are trimmed, and an
+  empty or whitespace-only value is treated as absent; `actor` is additionally
+  split on `,`, with each element trimmed, blank elements dropped, and the
+  remainder de-duplicated into a distinct set (§2.2). The same normalization
+  feeds both the SQL query and the cursor filter hash (§4.3).
 - **Filter combinations.** All optional filters are exact-match, combined with
   AND, and may appear in any subset; `resourceType` and `resourceId` are
   independent.
@@ -382,6 +423,12 @@ Why this covers **all** supported filter combinations:
   (in practice `(resource_id, timestamp, id)`) and applies the remaining
   equalities as cheap filters, or combines two of these via a bitmap-AND. Either
   way the query stays index-backed, satisfying the non-functional requirement.
+- A multi-actor filter is issued as `actor IN (v1, …, vN)` (N ≤ 10). PostgreSQL
+  serves it from `(actor, timestamp, id)` as up to N index range scans — one per
+  actor value — combined via a bitmap-OR, each scan still covering the
+  `timestamp` range and the `(timestamp, id)` keyset/sort. The query therefore
+  stays index-backed with no extra sort node, so the §9 NFR holds for the
+  multi-actor case as well.
 
 The `V1` indexes `idx_audit_events_actor` and `idx_audit_events_timestamp`
 (`timestamp DESC`) become redundant once the above exist — `(actor, timestamp, id)`
@@ -407,7 +454,9 @@ Operational and sequencing notes:
 
 1. The service must return only events whose `occurredAt` is in `[from, to)`.
 2. The service must apply optional filters (`actor`, `resourceType`,
-   `resourceId`) as exact-match AND conditions.
+   `resourceId`) as exact-match conditions combined with AND; a multi-valued
+   `actor` filter matches any value in the set (OR within the `actor` set, AND
+   with the other filters).
 3. The service must return results in ascending `occurredAt` order.
 4. The service must support cursor-based pagination so that iterating pages
    reaches every matching record exactly once, even when concurrent inserts occur
@@ -432,6 +481,6 @@ Operational and sequencing notes:
 | -------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | **Append-only — no `UPDATE`/`DELETE`, only `INSERT`**    | The query path issues `SELECT` statements only; it performs no `INSERT`/`UPDATE`/`DELETE` and installs no triggers. Pagination correctness *relies* on this: because rows are never mutated or removed, a row already returned keeps its `(occurredAt, id)`, and the strictly-greater keyset predicate `(occurredAt, id) > cursor` never re-yields it; concurrently appended rows only extend the tail. Hence no gaps, no duplicates (User Story 3). |
 | **`timestamp` is set by the server only**                | The endpoint never accepts or writes `occurredAt`; `from` and `to` are read-side filter bounds and are not persisted anywhere. The query cannot influence any stored timestamp.                                                                                                                                          |
-| **`actor` is mandatory**                                 | The `actor` filter is an exact match on a column guaranteed to be non-null, so the filter needs no special null handling; this is consistent with `actor` being required at write time.                                                                                                                                  |
+| **`actor` is mandatory**                                 | The `actor` filter is exact-match — a single value, or set membership via `actor IN (…)` for a multi-actor request — on a column guaranteed to be non-null, so the filter needs no special null handling; this is consistent with `actor` being required at write time.                                                                                                                                  |
 | **Read operations must not create side effects**         | `GET /api/v1/audit-events` performs only `SELECT`, writes no rows, and emits no audit event for the query itself; only standard request logging occurs. Error responses (`400`, `422`) likewise change no persisted state.                                                                                                |
-| **Architectural rules (supporting)**                     | The opaque-cursor codec lives in the API/infrastructure layer, never in `domain` (keeps `domain` free of HTTP/encoding concerns); syntactic validation (param presence, instant format, `limit` bounds, cursor decoding) sits in the API layer, while the `from`/`to` ordering rule and the 90-day cap are application-layer concerns — so the API layer carries no business logic; infrastructure depends on `domain`, never the reverse. |
+| **Architectural rules (supporting)**                     | The opaque-cursor codec lives in the API/infrastructure layer, never in `domain` (keeps `domain` free of HTTP/encoding concerns); syntactic validation (param presence, instant format, `limit` bounds, `actor`-list parsing and the 10-actor cap, cursor decoding) sits in the API layer, while the `from`/`to` ordering rule and the 90-day cap are application-layer concerns — so the API layer carries no business logic; infrastructure depends on `domain`, never the reverse. |
