@@ -6,6 +6,11 @@ A read-only HTTP endpoint that returns audit events filtered by actor, resource,
 and a mandatory time range. Results are paginated using an opaque cursor and
 returned in chronological (ascending) order.
 
+The `actor` filter accepts a comma-separated list of up to 10 distinct
+identifiers (`?actor=a1,a2,a3`); an event matches if its `actor` equals any
+listed value. This multi-actor form applies only to the paginated contract
+described here.
+
 This paginated contract is selected when both `from` and `to` are supplied. A
 pre-existing `GET /api/v1/audit-events?actor=…` shape is retained for backward
 compatibility and is unchanged by this work (see `design.md` §2.3).
@@ -34,8 +39,17 @@ findings for a regulator or internal review.
 **Acceptance criteria**
 
 - When a query supplies `from`, `to`, and `actor`, the system shall
-  return only events whose `actor` matches exactly and whose
-  `occurredAt` is in `[from, to)`.
+  return only events whose `occurredAt` is in `[from, to)` and whose
+  `actor` exactly equals one of the supplied actor values. The `actor`
+  parameter accepts a comma-separated list; the actor filter is OR
+  across the listed values and AND with every other filter.
+- When the `actor` list contains leading/trailing whitespace, empty
+  entries, or duplicate values, the system shall trim each entry,
+  discard empty entries, and collapse duplicates, applying the filter
+  to the resulting set of distinct actor values.
+- If a query supplies more than 10 distinct actor values (counted
+  after trimming and de-duplication), then the system shall reject the
+  request with HTTP 422 and shall not modify any persisted state.
 - Where `resourceType` and/or `resourceId` are supplied, the system
   shall further restrict the result to events whose resource matches
   the supplied fields exactly.
@@ -90,6 +104,13 @@ continue to be ingested.
 - If a malformed or undecodable `cursor` is supplied, then the system
   shall reject the request with HTTP 400 without altering server
   state.
+- Where the `actor` filter contains multiple values, the system shall
+  paginate the combined result set with the same exactly-once, no-gap,
+  and no-duplicate guarantees defined above for a single-actor query.
+- The logical filter set shall be independent of the order in which
+  `actor` values are supplied and of any duplicate entries; a
+  `nextCursor` issued for a given set of actor values shall remain
+  usable when that same set is re-supplied in any order.
 
 ## 3. Out of scope
 
@@ -100,7 +121,9 @@ continue to be ingested.
 - Aggregations, counts, or analytics.
 - Streaming / server-sent events.
 - Range queries or partial matches on `actor`, `resourceType`, or
-  `resourceId` (all filters are exact-match in this iteration).
+  `resourceId` (all filters are exact-match in this iteration; the
+  `actor` filter matches against a set of exact values, which is still
+  exact-match — not a range, prefix, or partial match).
 - Sorting in descending order or by fields other than `occurredAt`.
 
 ## 4. Open Questions
