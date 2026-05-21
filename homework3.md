@@ -4,7 +4,7 @@
 
 - Skill `spec-self-eval`: есть.
 - Stop hook (видимое блокирование на `FAIL` воспроизведено): да
-- Multi-actor filter (спека + план + код): не завершил, в процессе
+- Multi-actor filter (спека + план + код): да
 - Cross-check партнера пройден: да — Uladzislau Tratsiak.
 
 ## `AGENTS.md`
